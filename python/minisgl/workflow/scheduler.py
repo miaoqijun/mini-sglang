@@ -37,7 +37,7 @@ class NodeInfo:
 
 
 class WorkflowScheduler(Scheduler):
-    def __init__(self, model_path: str, dtype: torch.dtype = torch.bfloat16, schedule_policy: str = "FCFS", debug: bool = True, **kwargs):
+    def __init__(self, model_path: str, dtype: torch.dtype = torch.bfloat16, debug: bool = True, **kwargs):
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=DistributedInfo(0, 1),
@@ -175,5 +175,5 @@ class WorkflowScheduler(Scheduler):
             output_text = self.tokenizer.decode(status.output_ids)
             results[sink_node] = {"text": output_text, "token_ids": status.output_ids}
         if self.debug:
-            print(f"schduling history: {[self.info_map[uid].name for uid in self.prefill_manager.scheduling_history]}")
+            pass # to be implemented
         return results

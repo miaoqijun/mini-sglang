@@ -99,8 +99,7 @@ def main():
 
     # 6. Run
     workflow_scheduler = WorkflowScheduler(
-        "Qwen/Qwen3-0.6B",
-        schedule_policy="LPM",
+        model_name,
         max_seq_len_override=4096,
         max_extend_tokens=16384,
         cuda_graph_max_bs=256,
