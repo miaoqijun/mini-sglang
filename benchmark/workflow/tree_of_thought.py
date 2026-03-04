@@ -104,9 +104,11 @@ def main():
         max_extend_tokens=16384,
         cuda_graph_max_bs=256,
         page_size=256,
+        debug=True,
     )
-    results = workflow_scheduler.run_workflow(all_nodes)
+    results, info = workflow_scheduler.run_workflow(all_nodes)
     print(results[aggregate_node.uid]["text"])
+    print(info)
 
 if __name__ == "__main__":
     main()
