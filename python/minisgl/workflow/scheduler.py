@@ -15,6 +15,7 @@ from minisgl.message import (
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.prefill import ChunkedReq
 from minisgl.frontend import Node
+from tqdm import tqdm
 
 class NodeAllFinished(Exception):
     pass
@@ -58,6 +59,8 @@ class WorkflowScheduler(Scheduler):
         self.info_map: Dict[int, NodeInfo] = {}
         self.sink_nodes: List[int] = []
         self.num_completed = 0
+        self.completed_node = set()
+        self.pbar = None
 
     def _tokenize_one(self, prompt: List[int] | str) -> torch.Tensor:
         if isinstance(prompt, str):
@@ -96,11 +99,18 @@ class WorkflowScheduler(Scheduler):
         return input_ids
 
     def _prepare_dag(self, nodes: List[Node]) -> None:
+        # check unique id
+        nodes_set = set([node.uid for node in nodes])
+        assert len(nodes_set) == len(nodes), "Repeated node uid detected."
+
         self.pending_nodes = []
         self.status_map = {}
         self.info_map = {}
         
+        inference_node_cnt = 0
         for node in nodes:
+            if node.node_type == 'inference':
+                inference_node_cnt += 1
             self.info_map[node.uid] = NodeInfo(
                 node_type=node.node_type, input_organization=node.inputs, sampling_params=node.sampling_params, name=node.name,
                 in_degree=0, successors=set()
@@ -118,6 +128,9 @@ class WorkflowScheduler(Scheduler):
                 self.pending_nodes.append(uid)
             if len(node_info.successors) == 0:
                 self.sink_nodes.append(uid)
+
+        if inference_node_cnt > 0:
+            self.pbar = tqdm(total=inference_node_cnt, desc=f"running inference for {inference_node_cnt} nodes")
     
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         """
@@ -175,15 +188,13 @@ class WorkflowScheduler(Scheduler):
         return debug_info
 
     def offline_receive_msg(self, blocking: bool = False) -> List[BaseBackendMsg]:
-        if self.num_completed == len(self.info_map):
+        if blocking and self.num_completed == len(self.info_map):
             raise NodeAllFinished()
         results: List[BaseBackendMsg] = []
         added, sum_input_len = 0, 0
         for node_id in self.pending_nodes:
-            # We defer the budget exceeded detection to prefill manager for fully cache-aware scheduling.
-            # May cause too much CPU computation when many nodes are ready in the same time.
-            # if sum_input_len >= self.prefill_budget:
-            #     break
+            if sum_input_len >= self.prefill_budget:
+                break
             prompt, inherited_len = self._get_node_prompts(node_id)
             input_ids = self._tokenize_one(prompt)
             sampling_params = self.info_map[node_id].sampling_params
@@ -208,8 +219,11 @@ class WorkflowScheduler(Scheduler):
         for msg in reply:
             status = self.status_map[msg.uid]
             status.output_ids.append(msg.next_token)
-            if msg.finished and msg.next_token == self.eos_token_id: # request end, update dag
+            if msg.uid not in self.completed_node and msg.finished: # request end, update dag
                 self.num_completed += 1
+                self.pbar.update(1)
+                self.completed_node.add(msg.uid)
+
                 free_nodes = [msg.uid]
                 while len(free_nodes) > 0:
                     next_free_nodes = []
