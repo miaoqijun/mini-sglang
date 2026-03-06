@@ -32,5 +32,6 @@ env/
 .vscode/
 .coverage
 
-# test data
+# test data and log
 data
+*.txt

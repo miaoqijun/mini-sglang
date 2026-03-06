@@ -1,4 +1,3 @@
-from random import randint, seed
 import pandas as pd
 
 from transformers import AutoTokenizer
@@ -8,17 +7,15 @@ from minisgl.workflow import WorkflowScheduler
 from minisgl.frontend import PromptComponent, Node
 
 def main():
-    seed(0)
-
-    model_name = "Qwen/Qwen3-0.6B"
+    model_name = "Qwen/Qwen3-8B"
     data_file = "data/gsm8k-test.parquet"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    sampling_params = SamplingParams()
+    sampling_params = SamplingParams(temperature=1.0)
     num_branches = 2
     all_nodes = []
 
     data = pd.read_parquet(data_file)
-    for qid, q in enumerate(data['question'].head(100)):
+    for qid, q in enumerate(data['question']):
         # 1. plan
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -100,14 +97,14 @@ def main():
         aggregate_node = Node(inputs=aggregate_inputs, node_type="concatenate", name=f"q{qid}-aggregate")
         all_nodes.append(aggregate_node)
 
-    print(len(all_nodes))
     # Run
     workflow_scheduler = WorkflowScheduler(
         model_name,
-        max_seq_len_override=4096,
+        max_seq_len_override=8192,
         max_extend_tokens=16384,
         cuda_graph_max_bs=256,
         page_size=256,
+        # num_page_override=8, # to control kv cache size
         debug=True,
     )
     results, info = workflow_scheduler.run_workflow(all_nodes)

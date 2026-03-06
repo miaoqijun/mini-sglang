@@ -9,8 +9,7 @@ from minisgl.distributed import DistributedInfo
 from minisgl.message import (
     BaseBackendMsg,
     DetokenizeMsg,
-    UserMsg,
-    DebugInfoMsg
+    UserMsg
 )
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.prefill import ChunkedReq
@@ -40,6 +39,9 @@ class NodeInfo:
     in_degree: int
     successors: Set[int]
 
+    # debug info
+    queue_no: int = 0
+
 
 class WorkflowScheduler(Scheduler):
     def __init__(self, model_path: str, dtype: torch.dtype = torch.bfloat16, debug: bool = True, **kwargs):
@@ -60,6 +62,7 @@ class WorkflowScheduler(Scheduler):
         self.sink_nodes: List[int] = []
         self.num_completed = 0
         self.completed_node = set()
+        self.scheduled_order = []
         self.pbar = None
 
     def _tokenize_one(self, prompt: List[int] | str) -> torch.Tensor:
@@ -79,9 +82,9 @@ class WorkflowScheduler(Scheduler):
                 if prompt_component.text == "generated":
                     ref_ids = ref_status.output_ids
                 else: # all
-                    if i == 0: # first components and all reference, note that
-                        inherited_ids = ref_status.input_ids + ref_status.output_ids
                     ref_ids = ref_status.input_ids + ref_status.output_ids
+                    if i == 0: # first components and all reference, note that
+                        inherited_ids = ref_ids                   
                 text += self.tokenizer.decode(ref_ids)
         return text, len(inherited_ids)
     
@@ -132,45 +135,6 @@ class WorkflowScheduler(Scheduler):
         if inference_node_cnt > 0:
             self.pbar = tqdm(total=inference_node_cnt, desc=f"running inference for {inference_node_cnt} nodes")
     
-    def _process_last_data(self, last_data: ForwardData | None) -> None:
-        """
-        modified from original scheduler, for sending back cache hit tokens (for now)
-        """
-        if last_data is None:
-            return
-
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
-        copy_done.synchronize()
-        reply: List[DetokenizeMsg] = []
-        info: List[DebugInfoMsg] = []
-        new_finished_reqs: Set[Req] = set()
-        with self.cache_manager.lazy_free_region():
-            for i, req in enumerate(batch.reqs):
-                # Added: send debug info
-                if self.debug:
-                    info.append(DebugInfoMsg(uid=req.uid, cached_len=req.cached_len))
-
-                if isinstance(req, ChunkedReq):
-                    continue
-                next_token = next_tokens_cpu[i]
-                req.append_host(next_token.unsqueeze(0))
-                next_token = int(next_token.item())
-                finished = not req.can_decode
-                if not req.sampling_params.ignore_eos:
-                    finished |= next_token == self.eos_token_id
-                reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
-
-                # NOTE: overlap scheduling may make the request freed twice, skip second free
-                if finished and req not in self.finished_reqs:
-                    self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
-                    new_finished_reqs.add(req)
-                elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
-                    self.cache_manager.cache_req(req, finished=False)
-
-        self.finished_reqs = new_finished_reqs
-        self.send_result(reply, info)
-    
     def _get_debug_info(self):
         debug_info = {}
         # 1. cache hit rate
@@ -183,8 +147,11 @@ class WorkflowScheduler(Scheduler):
                 total_cached += min(node_status.cached_len, node_status.inherited_len) # only care tokens that should be cached
         debug_info['total_inherited'] = total_inherited
         debug_info['total_cached'] = total_cached
-        debug_info['hit_rate'] = total_cached / total_inherited
-        # 2.... other debug info (to be implemented)
+        if total_inherited > 0:
+            debug_info['hit_rate'] = total_cached / total_inherited
+        # 2. schedule order
+        debug_info['scheduled_order'] = self.scheduled_order
+        # ... other debug info (to be implemented)
         return debug_info
 
     def offline_receive_msg(self, blocking: bool = False) -> List[BaseBackendMsg]:
@@ -206,16 +173,11 @@ class WorkflowScheduler(Scheduler):
                 output_ids=[],
                 inherited_len=inherited_len,
             )
+        self.scheduled_order += [self.info_map[uid].name for uid in self.pending_nodes[:added]]
         self.pending_nodes = self.pending_nodes[added:]
         return results
 
-    def offline_send_result(self, reply: List[DetokenizeMsg], info: List[DebugInfoMsg]) -> None:
-        # process debug info
-        for msg in info:
-            status = self.status_map[msg.uid]
-            if status.cached_len == -1: # when requests got chunked, only update cache_len for the first chunk
-                status.cached_len = msg.cached_len
-
+    def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
         for msg in reply:
             status = self.status_map[msg.uid]
             status.output_ids.append(msg.next_token)
@@ -233,6 +195,7 @@ class WorkflowScheduler(Scheduler):
                             successor_info.in_degree -= 1
                             if successor_info.in_degree == 0:
                                 if successor_info.node_type == "inference":
+                                    self.info_map[successor].queue_no = len(self.pending_nodes) + len(self.prefill_manager.pending_list)
                                     self.pending_nodes.append(successor)
                                 elif successor_info.node_type == "concatenate":
                                     self.num_completed += 1
@@ -243,6 +206,39 @@ class WorkflowScheduler(Scheduler):
                                     )
                                     next_free_nodes.append(successor)
                     free_nodes = next_free_nodes
+    
+    def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
+        """
+        The main loop of overlapping scheduling and execution.
+
+        It will overlap the execution of current batch and processing of last batch's results,
+        which can effectively hide CPU latency and improve GPU utilization.
+        """
+        blocking = not (
+            last_data is not None  # don't block if we have a batch to be processed
+            or self.prefill_manager.runnable
+            or self.decode_manager.runnable
+        )
+        for msg in self.receive_msg(blocking=blocking):
+            self._process_one_msg(msg)
+
+        forward_input = self._schedule_next_batch()
+
+        # modified: update cached len for debug before forward
+        if self.debug and forward_input is not None:
+            for req in forward_input.batch.reqs:
+                status = self.status_map[req.uid]
+                if status.cached_len == -1: # only update cache_len for the first time
+                    status.cached_len = req.cached_len
+
+        ongoing_data = None
+        if forward_input is not None:
+            with self.engine_stream_ctx:  # run the batch in the engine's stream
+                self.engine.stream.wait_stream(self.stream)
+                ongoing_data = (forward_input, self._forward(forward_input))
+
+        self._process_last_data(last_data)
+        return ongoing_data
 
     def run_workflow(
         self,
