@@ -63,7 +63,10 @@ class WorkflowScheduler(Scheduler):
         self.num_completed = 0
         self.completed_node = set()
         self.scheduled_order = []
+
         self.pbar = None
+        self.cur_inherited = 0
+        self.cur_cached = 0
 
     def _tokenize_one(self, prompt: List[int] | str) -> torch.Tensor:
         if isinstance(prompt, str):
@@ -230,6 +233,10 @@ class WorkflowScheduler(Scheduler):
                 status = self.status_map[req.uid]
                 if status.cached_len == -1: # only update cache_len for the first time
                     status.cached_len = req.cached_len
+                    self.cur_inherited += status.inherited_len
+                    self.cur_cached += min(status.cached_len, status.inherited_len)
+                    if self.cur_inherited > 0:
+                        self.pbar.set_postfix(hit_rate=self.cur_cached / self.cur_inherited, refresh=True)
 
         ongoing_data = None
         if forward_input is not None:

@@ -1,4 +1,5 @@
 import pandas as pd
+import argparse
 
 from transformers import AutoTokenizer
 
@@ -6,16 +7,27 @@ from minisgl.core import SamplingParams
 from minisgl.workflow import WorkflowScheduler
 from minisgl.frontend import PromptComponent, Node
 
-def main():
-    model_name = "Qwen/Qwen3-8B"
-    data_file = "data/gsm8k-test.parquet"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    sampling_params = SamplingParams(temperature=1.0)
-    num_branches = 2
-    all_nodes = []
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, required=True, help="model path to run")
+    parser.add_argument("--data_path", type=str, default="data/gsm8k-test.parquet", help="path of the data file")
+    parser.add_argument("--temperature", type=float, default=1.0, help="temperature in sampling")
+    parser.add_argument("--num_branches", type=int, default=2, help="number of branches")
+    parser.add_argument("--num_requests", type=int, default=None, help="number of requests")
 
-    data = pd.read_parquet(data_file)
-    for qid, q in enumerate(data['question']):
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+
+    num_branches = args.num_branches
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    sampling_params = SamplingParams(temperature=args.temperature)
+    
+    all_nodes = []
+    data = pd.read_parquet(args.data_path)
+    num_requests = args.num_requests if args.num_requests is not None else len(data)
+    for qid, q in enumerate(data['question'].head(num_requests)):
         # 1. plan
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -99,7 +111,7 @@ def main():
 
     # Run
     workflow_scheduler = WorkflowScheduler(
-        model_name,
+        args.model_path,
         max_seq_len_override=8192,
         max_extend_tokens=16384,
         cuda_graph_max_bs=256,
