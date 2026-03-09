@@ -43,10 +43,11 @@ class NodeInfo:
     # debug info
     queue_no: int = 0
 
+@dataclass
 class WorkflowInfo:
-    inference_nodes: Set = set()
-    pending_nodes: List[int] = []
-    completed_nodes: Set = set()
+    inference_nodes: Set[int]
+    pending_nodes: List[int]
+    completed_nodes: Set[int]
 
 
 class WorkflowScheduler(Scheduler):
@@ -124,7 +125,7 @@ class WorkflowScheduler(Scheduler):
         inference_node_cnt = 0
         for node in nodes:
             if node.gid not in self.workflow_info_map:
-                self.workflow_info_map[node.gid] = WorkflowInfo()
+                self.workflow_info_map[node.gid] = WorkflowInfo(inference_nodes=set(), pending_nodes=[], completed_nodes=set())
             if node.node_type == 'inference':
                 self.workflow_info_map[node.gid].inference_nodes.add(node.uid)
                 inference_node_cnt += 1
@@ -176,10 +177,14 @@ class WorkflowScheduler(Scheduler):
         results: List[BaseBackendMsg] = []
         sum_input_len = 0
         completed_workflows = 0
+        all_completed_yet = True
         for gid in self.pending_workflows:
             workflow_info = self.workflow_info_map[gid]
-            if len(workflow_info.inference_nodes) == len(workflow_info.completed_nodes):
-                completed_workflows += 1
+            if all_completed_yet: # lazily removing completed workflow from pending_workflows
+                if len(workflow_info.inference_nodes) == len(workflow_info.completed_nodes):
+                    completed_workflows += 1
+                else:
+                    all_completed_yet = False
             added = 0
             for node_id in workflow_info.pending_nodes:
                 if sum_input_len >= self.prefill_budget:
