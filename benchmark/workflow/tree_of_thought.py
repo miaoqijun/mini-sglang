@@ -27,7 +27,7 @@ def main():
     all_nodes = []
     data = pd.read_parquet(args.data_path)
     num_requests = args.num_requests if args.num_requests is not None else len(data)
-    for qid, q in enumerate(data['question'].head(num_requests)):
+    for gid, q in enumerate(data['question'].head(num_requests)):
         # 1. plan
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -41,7 +41,7 @@ def main():
                 add_generation_prompt=True
             )
         )
-        plan_nodes = [Node(inputs=[plan_prompt], sampling_params=sampling_params, name=f"q{qid}-plan-{i}") for i in range(num_branches)]
+        plan_nodes = [Node(gid=gid, inputs=[plan_prompt], sampling_params=sampling_params, name=f"q{gid}-plan-{i}") for i in range(num_branches)]
         all_nodes += plan_nodes
         
         # 2. execute
@@ -60,7 +60,7 @@ def main():
                     )
                 )
             )
-            execute_nodes += [Node(inputs=execute_inputs, sampling_params=sampling_params, name=f"q{qid}-execute-{i*num_branches+j}") for j in range(num_branches)]
+            execute_nodes += [Node(gid=gid, inputs=execute_inputs, sampling_params=sampling_params, name=f"q{gid}-execute-{i*num_branches+j}") for j in range(num_branches)]
         all_nodes += execute_nodes
 
         # 3. reflect
@@ -79,7 +79,7 @@ def main():
                     )
                 )
             )
-            reflect_nodes += [Node(inputs=reflect_inputs, sampling_params=sampling_params, name=f"q{qid}-reflect-{i*num_branches+j}") for j in range(num_branches)]  
+            reflect_nodes += [Node(gid=gid, inputs=reflect_inputs, sampling_params=sampling_params, name=f"q{gid}-reflect-{i*num_branches+j}") for j in range(num_branches)]  
         all_nodes += reflect_nodes
 
         # 4. conclude
@@ -98,7 +98,7 @@ def main():
                     )
                 )
             )
-            conclude_nodes += [Node(inputs=conclude_inputs, sampling_params=sampling_params, name=f"q{qid}-conclude-{i*num_branches+j}") for j in range(num_branches)]  
+            conclude_nodes += [Node(gid=gid, inputs=conclude_inputs, sampling_params=sampling_params, name=f"q{gid}-conclude-{i*num_branches+j}") for j in range(num_branches)]  
         all_nodes += conclude_nodes
         
         # 5. aggregate
@@ -106,7 +106,7 @@ def main():
             PromptComponent(text="generated", node_ref=conclude_node.uid) 
             for conclude_node in conclude_nodes
         ]
-        aggregate_node = Node(inputs=aggregate_inputs, node_type="concatenate", name=f"q{qid}-aggregate")
+        aggregate_node = Node(gid=gid, inputs=aggregate_inputs, node_type="concatenate", name=f"q{gid}-aggregate")
         all_nodes.append(aggregate_node)
 
     # Run

@@ -10,7 +10,8 @@ class PromptComponent:
             assert self.text == "all" or self.text == "generated", "If `node_ref` specified, `text` must be \'all\' or \'generated\'."
 
 class Node:
-    def __init__(self, inputs: List[PromptComponent], sampling_params: SamplingParams = None, name: str = None, node_type: str = "inference"):
+    def __init__(self, gid: int, inputs: List[PromptComponent], sampling_params: SamplingParams = None, name: str = None, node_type: str = "inference"):
+        self.gid = gid
         self.uid = uuid.uuid4().int
         self.inputs = inputs
         self.name = name

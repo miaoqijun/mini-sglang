@@ -29,6 +29,7 @@ class NodeStatus:
 
 @dataclass
 class NodeInfo:
+    gid: int
     # inference info
     node_type: str
     name: str
@@ -41,6 +42,11 @@ class NodeInfo:
 
     # debug info
     queue_no: int = 0
+
+class WorkflowInfo:
+    inference_nodes: Set = set()
+    pending_nodes: List[int] = []
+    completed_nodes: Set = set()
 
 
 class WorkflowScheduler(Scheduler):
@@ -56,12 +62,13 @@ class WorkflowScheduler(Scheduler):
 
         self.debug = debug
 
-        self.pending_nodes: List[int] = []
+        self.pending_workflows: List[int] = []
         self.status_map: Dict[int, NodeStatus] = {}
         self.info_map: Dict[int, NodeInfo] = {}
         self.sink_nodes: List[int] = []
         self.num_completed = 0
         self.completed_node = set()
+        self.workflow_info_map: Dict[int, WorkflowInfo] = {}
         self.scheduled_order = []
 
         self.pbar = None
@@ -109,16 +116,20 @@ class WorkflowScheduler(Scheduler):
         nodes_set = set([node.uid for node in nodes])
         assert len(nodes_set) == len(nodes), "Repeated node uid detected."
 
-        self.pending_nodes = []
+        self.pending_workflows = []
         self.status_map = {}
         self.info_map = {}
+        self.workflow_info_map = {}
         
         inference_node_cnt = 0
         for node in nodes:
+            if node.gid not in self.workflow_info_map:
+                self.workflow_info_map[node.gid] = WorkflowInfo()
             if node.node_type == 'inference':
+                self.workflow_info_map[node.gid].inference_nodes.add(node.uid)
                 inference_node_cnt += 1
             self.info_map[node.uid] = NodeInfo(
-                node_type=node.node_type, input_organization=node.inputs, sampling_params=node.sampling_params, name=node.name,
+                gid=node.gid, node_type=node.node_type, input_organization=node.inputs, sampling_params=node.sampling_params, name=node.name,
                 in_degree=0, successors=set()
             )
 
@@ -131,7 +142,9 @@ class WorkflowScheduler(Scheduler):
         
         for uid, node_info in self.info_map.items():
             if node_info.in_degree == 0:
-                self.pending_nodes.append(uid)
+                if node_info.gid not in self.pending_workflows:
+                    self.pending_workflows.append(node_info.gid)
+                self.workflow_info_map[node_info.gid].pending_nodes.append(uid)
             if len(node_info.successors) == 0:
                 self.sink_nodes.append(uid)
 
@@ -161,23 +174,30 @@ class WorkflowScheduler(Scheduler):
         if blocking and self.num_completed == len(self.info_map):
             raise NodeAllFinished()
         results: List[BaseBackendMsg] = []
-        added, sum_input_len = 0, 0
-        for node_id in self.pending_nodes:
-            if sum_input_len >= self.prefill_budget:
-                break
-            prompt, inherited_len = self._get_node_prompts(node_id)
-            input_ids = self._tokenize_one(prompt)
-            sampling_params = self.info_map[node_id].sampling_params
-            sum_input_len += len(input_ids)
-            added += 1
-            results.append(UserMsg(uid=node_id, input_ids=input_ids, sampling_params=sampling_params))
-            self.status_map[node_id] = NodeStatus(
-                input_ids=input_ids.tolist(),
-                output_ids=[],
-                inherited_len=inherited_len,
-            )
-        self.scheduled_order += [self.info_map[uid].name for uid in self.pending_nodes[:added]]
-        self.pending_nodes = self.pending_nodes[added:]
+        sum_input_len = 0
+        completed_workflows = 0
+        for gid in self.pending_workflows:
+            workflow_info = self.workflow_info_map[gid]
+            if len(workflow_info.inference_nodes) == len(workflow_info.completed_nodes):
+                completed_workflows += 1
+            added = 0
+            for node_id in workflow_info.pending_nodes:
+                if sum_input_len >= self.prefill_budget:
+                    break
+                prompt, inherited_len = self._get_node_prompts(node_id)
+                input_ids = self._tokenize_one(prompt)
+                sampling_params = self.info_map[node_id].sampling_params
+                sum_input_len += len(input_ids)
+                added += 1
+                results.append(UserMsg(uid=node_id, input_ids=input_ids, sampling_params=sampling_params))
+                self.status_map[node_id] = NodeStatus(
+                    input_ids=input_ids.tolist(),
+                    output_ids=[],
+                    inherited_len=inherited_len,
+                )
+            self.scheduled_order += [self.info_map[uid].name for uid in workflow_info.pending_nodes[:added]]
+            workflow_info.pending_nodes = workflow_info.pending_nodes[added:]
+        self.pending_workflows = self.pending_workflows[completed_workflows:]
         return results
 
     def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
@@ -188,6 +208,8 @@ class WorkflowScheduler(Scheduler):
                 self.num_completed += 1
                 self.pbar.update(1)
                 self.completed_node.add(msg.uid)
+                workflow_info = self.workflow_info_map[self.info_map[msg.uid].gid]
+                workflow_info.completed_nodes.add(msg.uid)
 
                 free_nodes = [msg.uid]
                 while len(free_nodes) > 0:
@@ -198,8 +220,7 @@ class WorkflowScheduler(Scheduler):
                             successor_info.in_degree -= 1
                             if successor_info.in_degree == 0:
                                 if successor_info.node_type == "inference":
-                                    self.info_map[successor].queue_no = len(self.pending_nodes) + len(self.prefill_manager.pending_list)
-                                    self.pending_nodes.append(successor)
+                                    self.workflow_info_map[successor_info.gid].pending_nodes.append(successor)
                                 elif successor_info.node_type == "concatenate":
                                     self.num_completed += 1
                                     input_ids = self._get_node_input_ids(successor)
