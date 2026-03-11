@@ -13,7 +13,7 @@ from minisgl.message import (
 )
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.prefill import ChunkedReq
-from minisgl.frontend import Node
+from .prefill import LPMPrefillManager
 from tqdm import tqdm
 
 class NodeAllFinished(Exception):
@@ -53,6 +53,7 @@ class WorkflowScheduler(Scheduler):
             **kwargs,
         )
         super().__init__(config)
+        self.prefill_manager = LPMPrefillManager(self.cache_manager, self.table_manager, self.decode_manager)
 
         self.debug = debug
 
@@ -163,8 +164,8 @@ class WorkflowScheduler(Scheduler):
         results: List[BaseBackendMsg] = []
         added, sum_input_len = 0, 0
         for node_id in self.pending_nodes:
-            if sum_input_len >= self.prefill_budget:
-                break
+            # if sum_input_len >= self.prefill_budget:
+            #     break
             prompt, inherited_len = self._get_node_prompts(node_id)
             input_ids = self._tokenize_one(prompt)
             sampling_params = self.info_map[node_id].sampling_params
