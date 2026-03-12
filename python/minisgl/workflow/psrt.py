@@ -1,13 +1,13 @@
-from typing import List
+from typing import List, Tuple, Dict
 from minisgl.frontend import Node
 
 class PSRTNode:
-    def __init__(node: Node):
+    def __init__(self, node: Node):
         self.uid = node.uid
         self.name = node.name
         self.sampling_params = node.sampling_params
         if node.inputs[0].node_ref is not None and node.inputs[0].text == "all":
-            self.parent = node.inputs[0].node_ref
+            self.parent = node.inputs[0].node_ref # store uid first, processed in get_PSRTs() later
         else:
             self.parent = None
 
@@ -17,7 +17,7 @@ class PSRTNode:
         self.ready_predecessor = 0
 
         self.children = []
-        self.successor = []
+        self.successors = []
 
         self.root_uid = None
 
@@ -41,7 +41,7 @@ class PSRTNode:
             self.size = children_sizes + 1
         return self.size
 
-def get_PSRTs(nodes: List[Node]) -> List[Node]: # return roots
+def get_PSRTs(nodes: List[Node]) -> Tuple[List[PSRTNode], Dict[int, PSRTNode]]: # return roots
     tnodes = [PSRTNode(node) for node in nodes]
     uid2node = {node.uid: node for node in tnodes}
     roots = []
@@ -49,9 +49,10 @@ def get_PSRTs(nodes: List[Node]) -> List[Node]: # return roots
         if node.parent is None:
             roots.append(node)
         else:
-            node.parent.chlidren.append(node)
+            node.parent = uid2node[node.parent]
+            node.parent.children.append(node)
         for input_component in node.inputs:
             if input_component.node_ref is not None:
                 predecessor = uid2node[input_component.node_ref]
-                predecessor.successor.append(node)
-    return roots
+                predecessor.successors.append(node)
+    return roots, uid2node

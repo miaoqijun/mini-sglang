@@ -44,9 +44,10 @@ class WorkflowScheduler(Scheduler):
         self.debug = debug
 
         self.status_map: Dict[int, NodeStatus] = {}
+        self.info_map: Dict[int, PSRTNode] = {}
         self.ready_nodes: List[PSRTNode] = []
-        self.num_completed = 0
-        self.completed_nodes = set()
+        self.node_cnt = 0
+        self.completed_node = set()
         self.scheduled_order = []
 
         self.t = 0
@@ -77,8 +78,8 @@ class WorkflowScheduler(Scheduler):
                 text += self.tokenizer.decode(ref_ids)
         return text, len(inherited_ids)
     
-    def _add_request(self):
-        if self.num_completed == len(self.status_map):
+    def _add_requests(self):
+        if len(self.completed_node) == self.node_cnt:
             raise NodeAllFinished()
 
         for node in self.ready_nodes:
@@ -86,7 +87,7 @@ class WorkflowScheduler(Scheduler):
             prompt, inherited_len = self._get_node_prompts(node)
             input_ids = self._tokenize_one(prompt)
             sampling_params = node.sampling_params
-            self.status_map[node_id] = NodeStatus(
+            self.status_map[node.uid] = NodeStatus(
                 input_ids=input_ids.tolist(),
                 output_ids=[],
                 inherited_len=inherited_len,
@@ -105,8 +106,9 @@ class WorkflowScheduler(Scheduler):
                     f"Adjust max_tokens to {max_output_len} for request {node.uid}."
                 )
 
-            node.t = self.t if node.parent is None else node.get_root().t
+            node.t = self.t if node.parent is None else self.info_map[node.get_root()].t
             self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params, node.t)
+        self.ready_nodes = []
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
@@ -163,30 +165,13 @@ class WorkflowScheduler(Scheduler):
             status = self.status_map[msg.uid]
             status.output_ids.append(msg.next_token)
             if msg.uid not in self.completed_node and msg.finished: # request end, update dag
-                self.num_completed += 1
                 self.pbar.update(1)
                 self.completed_node.add(msg.uid)
 
-                free_nodes = [msg.uid]
-                while len(free_nodes) > 0:
-                    next_free_nodes = []
-                    for free_node in free_nodes:
-                        for successor in self.info_map[free_node].successors:
-                            successor_info = self.info_map[successor]
-                            successor_info.in_degree -= 1
-                            if successor_info.in_degree == 0:
-                                if successor_info.node_type == "inference":
-                                    self.info_map[successor].queue_no = len(self.pending_nodes) + len(self.prefill_manager.pending_list)
-                                    self.pending_nodes.append(successor)
-                                elif successor_info.node_type == "concatenate":
-                                    self.num_completed += 1
-                                    input_ids = self._get_node_input_ids(successor)
-                                    self.status_map[successor] = NodeStatus(
-                                        input_ids=input_ids,
-                                        output_ids=input_ids,
-                                    )
-                                    next_free_nodes.append(successor)
-                    free_nodes = next_free_nodes
+                for successor in self.info_map[msg.uid].successors:
+                    successor.ready_predecessor += 1
+                    if successor.ready_predecessor == successor.in_degree:
+                        self.ready_nodes.append(successor)
     
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
         """
@@ -223,7 +208,10 @@ class WorkflowScheduler(Scheduler):
         self,
         nodes: List[Node],
     ) -> Dict[int, Dict[str, str | List[int]]]:
-        self.roots = get_PSRTs(nodes)
+        self.node_cnt = len(nodes)
+        self.pbar = tqdm(total=self.node_cnt, desc=f"running inference for {self.node_cnt} nodes")
+        self.roots, self.info_map = get_PSRTs(nodes)
+        self.ready_nodes = [root for root in self.roots if root.in_degree == 0]
         self.prefill_manager.waiting_queue = [root for root in self.roots]
         try:
             self.run_forever()
