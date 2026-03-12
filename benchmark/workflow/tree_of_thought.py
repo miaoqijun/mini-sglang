@@ -100,14 +100,6 @@ def main():
             )
             conclude_nodes += [Node(inputs=conclude_inputs, sampling_params=sampling_params, name=f"q{qid}-conclude-{i*num_branches+j}") for j in range(num_branches)]  
         all_nodes += conclude_nodes
-        
-        # 5. aggregate
-        aggregate_inputs = [
-            PromptComponent(text="generated", node_ref=conclude_node.uid) 
-            for conclude_node in conclude_nodes
-        ]
-        aggregate_node = Node(inputs=aggregate_inputs, node_type="concatenate", name=f"q{qid}-aggregate")
-        all_nodes.append(aggregate_node)
 
     # Run
     workflow_scheduler = WorkflowScheduler(
