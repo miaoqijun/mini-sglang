@@ -257,11 +257,11 @@ class WorkflowScheduler(Scheduler):
         except NodeAllFinished:
             pass
         results: Dict[int, Dict[str, str | List[int]]] = {}
-        for sink_node in self.sink_nodes:
-            status = self.status_map[sink_node]
+        for node in nodes:
+            status = self.status_map[node.uid]
             output_text = self.tokenizer.decode(status.output_ids)
-            results[sink_node] = {"text": output_text, "token_ids": status.output_ids}
+            results[node.uid] = {"text": output_text, "token_ids": status.output_ids, "output_len": len(status.output_ids)}
         if self.debug:
             return results, self._get_debug_info()
         else:
-            return results
+            return results, None

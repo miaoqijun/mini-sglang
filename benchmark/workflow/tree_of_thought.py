@@ -1,5 +1,6 @@
 import pandas as pd
 import argparse
+import time
 
 from transformers import AutoTokenizer
 
@@ -100,14 +101,6 @@ def main():
             )
             conclude_nodes += [Node(inputs=conclude_inputs, sampling_params=sampling_params, name=f"q{qid}-conclude-{i*num_branches+j}") for j in range(num_branches)]  
         all_nodes += conclude_nodes
-        
-        # 5. aggregate
-        aggregate_inputs = [
-            PromptComponent(text="generated", node_ref=conclude_node.uid) 
-            for conclude_node in conclude_nodes
-        ]
-        aggregate_node = Node(inputs=aggregate_inputs, node_type="concatenate", name=f"q{qid}-aggregate")
-        all_nodes.append(aggregate_node)
 
     # Run
     workflow_scheduler = WorkflowScheduler(
@@ -117,11 +110,14 @@ def main():
         cuda_graph_max_bs=256,
         page_size=256,
         # num_page_override=8, # to control kv cache size
-        debug=True,
+        debug=False,
     )
+    t = time.time()
     results, info = workflow_scheduler.run_workflow(all_nodes)
+    t = time.time() - t
+    throughput = sum([status['output_len'] for status in results.values()]) / t
+    print(throughput)
     # print(results[aggregate_node.uid]["text"])
-    print(info)
 
 if __name__ == "__main__":
     main()
