@@ -1,5 +1,6 @@
 import pandas as pd
 import argparse
+import time
 
 from transformers import AutoTokenizer
 
@@ -117,11 +118,13 @@ def main():
         cuda_graph_max_bs=256,
         page_size=256,
         # num_page_override=8, # to control kv cache size
-        debug=True,
+        debug=False,
     )
+    t = time.time()
     results, info = workflow_scheduler.run_workflow(all_nodes)
-    # print(results[aggregate_node.uid]["text"])
-    print(info)
+    t = time.time() - t
+    throughput = sum([status["output_len"] for status in results.values()]) / t
+    print(throughput)
 
 if __name__ == "__main__":
     main()
