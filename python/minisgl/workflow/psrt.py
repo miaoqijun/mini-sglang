@@ -27,7 +27,7 @@ class PSRTNode:
     
     def get_root(self):
         if self.root_uid is None:
-            node = self.parent
+            node = self
             while node.parent is not None:
                 node = node.parent
             self.root_uid = node.uid

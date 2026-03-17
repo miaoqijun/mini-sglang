@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple
 
 import torch
-from minisgl.core import SamplingParams
+from minisgl.core import SamplingParams, Req
 from minisgl.distributed import DistributedInfo
 from minisgl.message import (
     BaseBackendMsg,
@@ -77,38 +77,76 @@ class WorkflowScheduler(Scheduler):
                         inherited_ids = ref_ids                   
                 text += self.tokenizer.decode(ref_ids)
         return text, len(inherited_ids)
+
+    def _check_sampling_params(self, sampling_params, input_len):
+        max_seq_len = self.engine.max_seq_len
+        max_output_len = max_seq_len - input_len
+        if max_output_len <= 0:
+            return logger.warning_rank0(
+                f"Input sequence length {input_len} exceeds {max_seq_len}, "
+                f"request {node.uid} is dropped."
+            )
+        if sampling_params.max_tokens > max_output_len:
+            sampling_params.max_tokens = max_output_len
+            logger.warning_rank0(
+                f"Adjust max_tokens to {max_output_len} for request {node.uid}."
+            )
+        return sampling_params
     
     def _add_requests(self):
         if len(self.completed_node) == self.node_cnt:
             raise NodeAllFinished()
 
         for node in self.ready_nodes:
-            self.t += 1   
             prompt, inherited_len = self._get_node_prompts(node)
             input_ids = self._tokenize_one(prompt)
-            sampling_params = node.sampling_params
             self.status_map[node.uid] = NodeStatus(
                 input_ids=input_ids.tolist(),
                 output_ids=[],
                 inherited_len=inherited_len,
-            )
+            )     
 
-            input_len, max_seq_len = len(input_ids), self.engine.max_seq_len
-            max_output_len = max_seq_len - input_len
-            if max_output_len <= 0:
-                return logger.warning_rank0(
-                    f"Input sequence length {input_len} exceeds {max_seq_len}, "
-                    f"request {node.uid} is dropped."
-                )
-            if sampling_params.max_tokens > max_output_len:
-                sampling_params.max_tokens = max_output_len
-                logger.warning_rank0(
-                    f"Adjust max_tokens to {max_output_len} for request {node.uid}."
-                )
-
-            node.t = self.t if node.parent is None else self.info_map[node.get_root()].t
-            self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params, node.t)
+            sampling_params = self._check_sampling_params(node.sampling_params, len(input_ids))
+            if node.parent is None: # record psrt enter time
+                node.t = self.t
+                self.t += 1
+            self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params, self.info_map[node.get_root()].t)
         self.ready_nodes = []
+    
+    def _spawn_children_reqs(self, parent_req: Req, node: PSRTNode) -> None:
+        self.cache_manager.cache_req(parent_req, finished=False)
+        for i, child in enumerate(node.children):
+            child_handle = parent_req.cache_handle 
+            if i == 0:
+                # first child: inheret parent's table_idx and handle
+                child_table_idx = parent_req.table_idx
+                child_handle = parent_req.cache_handle 
+            else:
+                # next children: 
+                # add node reference
+                self.cache_manager.lock(child_handle)
+                # need to allocate in PrefillAdder
+                child_table_idx = None
+
+            # prepare a new req
+            assert len(child.inputs) == 2 and child.inputs[1].node_ref is None, "We are assuming only root nodes have inter-psrt dependencies."
+            input_ids = torch.cat([parent_req.input_ids, self._tokenize_one(child.inputs[1].text)])
+            self.status_map[child.uid] = NodeStatus(
+                input_ids=input_ids.tolist(),
+                output_ids=[],
+                inherited_len=len(parent_req.input_ids),
+            )    
+            sampling_params = self._check_sampling_params(child.sampling_params, len(input_ids))
+            child_req = Req(
+                input_ids=input_ids,
+                table_idx=child_table_idx,
+                cached_len=len(parent_req.input_ids),
+                output_len=sampling_params.max_tokens,
+                uid=child.uid,
+                sampling_params=parent_req.sampling_params, 
+                cache_handle=child_handle,
+            )
+            self.prefill_manager.add_child_req(child_req, self.info_map[child.get_root()].t)
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
@@ -133,13 +171,32 @@ class WorkflowScheduler(Scheduler):
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
+
+                    # expand psrt or free (leave node)
+                    # TODO: we are assuming only root nodes have inter-psrt dependencies, so children are ready as soon as their parents are completed
+                    node = self.info_map[req.uid]
+                    if len(node.children) > 0:
+                        self._spawn_children_reqs(req, node)
+                    else:
+                        self._free_req_resources(req)
+
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     self.cache_manager.cache_req(req, finished=False)
 
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
+
+    def _schedule_next_batch(self) -> ForwardInput | None:
+        # TODO: support other policies: e.g. DECODE first
+        batch = (
+            self.prefill_manager.schedule_next_batch(self.prefill_budget)
+            or self.decode_manager.schedule_next_batch()
+        )
+        if batch is None and self.prefill_manager.runnable: # starvation
+            logger.warning_rank0("Scheduling starved due to insufficient memory. Triggering eviction.")
+            self.prefill_manager.evict_one()
+        return self._prepare_batch(batch) if batch else None
     
     def _get_debug_info(self):
         debug_info = {}
@@ -155,8 +212,6 @@ class WorkflowScheduler(Scheduler):
         debug_info['total_cached'] = total_cached
         if total_inherited > 0:
             debug_info['hit_rate'] = total_cached / total_inherited
-        # 2. schedule order
-        debug_info['scheduled_order'] = self.scheduled_order
         # ... other debug info (to be implemented)
         return debug_info
 
@@ -169,6 +224,8 @@ class WorkflowScheduler(Scheduler):
                 self.completed_node.add(msg.uid)
 
                 for successor in self.info_map[msg.uid].successors:
+                    if successor.parent is not None: # only need to wake up other PSRT's root
+                        continue
                     successor.ready_predecessor += 1
                     if successor.ready_predecessor == successor.in_degree:
                         self.ready_nodes.append(successor)
@@ -221,8 +278,8 @@ class WorkflowScheduler(Scheduler):
         for node in nodes:
             status = self.status_map[node.uid]
             output_text = self.tokenizer.decode(status.output_ids)
-            results[node.uid] = {"text": output_text, "token_ids": status.output_ids}
+            results[node.uid] = {"text": output_text, "token_ids": status.output_ids, "output_len": len(status.output_ids)}
         if self.debug:
             return results, self._get_debug_info()
         else:
-            return results
+            return results, None
