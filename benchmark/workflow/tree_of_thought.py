@@ -110,7 +110,7 @@ def main():
         cuda_graph_max_bs=256,
         page_size=256,
         # num_page_override=8, # to control kv cache size
-        debug=False,
+        debug=True,
     )
     t = time.time()
     results, info = workflow_scheduler.run_workflow(all_nodes)

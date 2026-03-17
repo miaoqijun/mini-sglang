@@ -14,10 +14,13 @@ from minisgl.message import (
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.prefill import ChunkedReq
 from minisgl.frontend import Node
+from minisgl.utils import init_logger
 from tqdm import tqdm
 
 from .psrt import PSRTNode, get_PSRTs
 from .prefill import PSRTPrefillManager
+
+logger = init_logger(__name__)
 
 class NodeAllFinished(Exception):
     pass
