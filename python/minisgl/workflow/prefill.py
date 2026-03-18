@@ -62,14 +62,10 @@ class PSRTPrefillManager(PrefillManager):
         for i in range(len(self.pending_list) - 1, -1, -1):
             req = self.pending_list[i]
             if req.chunked_req is not None and type(req.chunked_req) is Req: # child req
-                victim = req.chunked_req
-                
-                if victim.table_idx is not None:
-                    self.table_manager.free(victim.table_idx)
-                self.cache_manager.unlock(victim.cache_handle)
+                self.cache_manager.unlock(req.chunked_req.cache_handle)
                 
                 req.chunked_req = None 
-                logger.info_rank0(f"Evicted pending child_req {victim.uid} to free up space.")
+                logger.info_rank0(f"Evicted pending child_req {req.uid} to free up space.")
                 return True
         return False
 
@@ -112,7 +108,7 @@ class PSRTPrefillManager(PrefillManager):
                     reqs.append(req)
                     added += 1
                 else:
-                    if adder.token_budget <= 0 or self.table_manager.available_size == 0:
+                    if adder.token_budget <= 0:
                         budget_exhausted = True
                     break  # We cannot add more requests
 

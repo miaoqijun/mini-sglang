@@ -15,10 +15,12 @@ from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.prefill import ChunkedReq
 from minisgl.frontend import Node
 from minisgl.utils import init_logger
+from minisgl.kvcache import BaseCacheHandle
 from tqdm import tqdm
 
 from .psrt import PSRTNode, get_PSRTs
 from .prefill import PSRTPrefillManager
+from .cache import PSRTCacheManager
 
 logger = init_logger(__name__)
 
@@ -42,6 +44,9 @@ class WorkflowScheduler(Scheduler):
             **kwargs,
         )
         super().__init__(config)
+        self.cache_manager = PSRTCacheManager(
+            self.engine.num_pages, config.page_size, self.engine.page_table, config.cache_type
+        )
         self.prefill_manager = PSRTPrefillManager(self.cache_manager, self.table_manager, self.decode_manager)
 
         self.debug = debug
@@ -116,20 +121,9 @@ class WorkflowScheduler(Scheduler):
             self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params, self.info_map[node.get_root()].t)
         self.ready_nodes = []
     
-    def _spawn_children_reqs(self, parent_req: Req, node: PSRTNode) -> None:
-        self.cache_manager.cache_req(parent_req, finished=False)
+    def _spawn_children_reqs(self, parent_req: Req, node: PSRTNode, handle: BaseCacheHandle) -> None:
         for i, child in enumerate(node.children):
-            child_handle = parent_req.cache_handle 
-            if i == 0:
-                # first child: inheret parent's table_idx and handle
-                child_table_idx = parent_req.table_idx
-                child_handle = parent_req.cache_handle 
-            else:
-                # next children: 
-                # add node reference
-                self.cache_manager.lock(child_handle)
-                # need to allocate in PrefillAdder
-                child_table_idx = None
+            self.cache_manager.lock(handle)
 
             # prepare a new req
             assert len(child.inputs) == 2 and child.inputs[1].node_ref is None, "We are assuming only root nodes have inter-psrt dependencies."
@@ -142,14 +136,18 @@ class WorkflowScheduler(Scheduler):
             sampling_params = self._check_sampling_params(child.sampling_params, len(input_ids))
             child_req = Req(
                 input_ids=input_ids,
-                table_idx=child_table_idx,
+                table_idx=None,# need to allocate in PrefillAdder
                 cached_len=len(parent_req.input_ids),
                 output_len=sampling_params.max_tokens,
                 uid=child.uid,
                 sampling_params=parent_req.sampling_params, 
-                cache_handle=child_handle,
+                cache_handle=handle,
             )
             self.prefill_manager.add_child_req(child_req, self.info_map[child.get_root()].t)
+    
+    def _free_req_resources(self, req: Req) -> BaseCacheHandle:
+        self.table_manager.free(req.table_idx)
+        return self.cache_manager.cache_req(req, finished=True)
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
@@ -178,10 +176,9 @@ class WorkflowScheduler(Scheduler):
                     # expand psrt or free (leave node)
                     # TODO: we are assuming only root nodes have inter-psrt dependencies, so children are ready as soon as their parents are completed
                     node = self.info_map[req.uid]
+                    new_handle = self._free_req_resources(req)
                     if len(node.children) > 0:
-                        self._spawn_children_reqs(req, node)
-                    else:
-                        self._free_req_resources(req)
+                        self._spawn_children_reqs(req, node, new_handle)
 
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
