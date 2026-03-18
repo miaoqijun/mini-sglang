@@ -96,7 +96,7 @@ class WorkflowScheduler(Scheduler):
             )
         return sampling_params
     
-    def _add_requests(self):
+    def _add_ready_nodes(self):
         if len(self.completed_node) == self.node_cnt:
             raise NodeAllFinished()
 
@@ -197,8 +197,7 @@ class WorkflowScheduler(Scheduler):
             or self.decode_manager.schedule_next_batch()
         )
         if batch is None and self.prefill_manager.runnable: # starvation
-            logger.warning_rank0("Scheduling starved due to insufficient memory. Triggering eviction.")
-            self.prefill_manager.evict_one()
+            logger.critical_rank0("Scheduling starved due to insufficient memory.")
         return self._prepare_batch(batch) if batch else None
     
     def _get_debug_info(self):
@@ -240,7 +239,7 @@ class WorkflowScheduler(Scheduler):
         It will overlap the execution of current batch and processing of last batch's results,
         which can effectively hide CPU latency and improve GPU utilization.
         """
-        self._add_requests()
+        self._add_ready_nodes()
 
         forward_input = self._schedule_next_batch()
 

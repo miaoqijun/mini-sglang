@@ -57,7 +57,7 @@ class PSRTPrefillAdder(PrefillAdder):
 class PSRTPrefillManager(PrefillManager):
     priority_list: List[int] = field(default_factory=list)
 
-    def evict_one(self) -> None:
+    def evict_one(self) -> bool:
         # find child requests from the end of the pending_list
         for i in range(len(self.pending_list) - 1, -1, -1):
             req = self.pending_list[i]
@@ -69,8 +69,9 @@ class PSRTPrefillManager(PrefillManager):
                 self.cache_manager.unlock(victim.cache_handle)
                 
                 req.chunked_req = None 
-                logger.warning_rank0(f"Evicted pending child_req {victim.uid} to free up space.")
-                return
+                logger.info_rank0(f"Evicted pending child_req {victim.uid} to free up space.")
+                return True
+        return False
 
     def add_one_req(self, uid, input_ids, sampling_params, priority) -> None:
         idx = bisect.bisect_right(self.priority_list, priority)
@@ -98,16 +99,30 @@ class PSRTPrefillManager(PrefillManager):
         )
         reqs: List[Req] = []
         chunked_list: List[PendingReq] = []
-        for pending_req in self.pending_list:
-            if req := adder.try_add_one(pending_req):
-                pending_req.chunked_req = None
-                if isinstance(req, ChunkedReq):
-                    pending_req.chunked_req = req
-                    chunked_list.append(pending_req)
-                reqs.append(req)
-            else:
-                break  # We cannot add more requests
+        while True:
+            added = 0
+            budget_exhausted = False
+
+            for pending_req in self.pending_list:
+                if req := adder.try_add_one(pending_req):
+                    pending_req.chunked_req = None
+                    if isinstance(req, ChunkedReq):
+                        pending_req.chunked_req = req
+                        chunked_list.append(pending_req)
+                    reqs.append(req)
+                    added += 1
+                else:
+                    if adder.token_budget <= 0 or self.table_manager.available_size == 0:
+                        budget_exhausted = True
+                    break  # We cannot add more requests
+
+            self.pending_list = self.pending_list[added:]
+            if budget_exhausted or len(self.pending_list) == 0:
+                break
+            if not self.evict_one():
+                break
+        self.pending_list = chunked_list + self.pending_list
+
         if len(reqs) == 0:
             return None
-        self.pending_list = chunked_list + self.pending_list[len(reqs) :]
         return Batch(reqs=reqs, phase="prefill")
