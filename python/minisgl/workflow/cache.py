@@ -1,9 +1,8 @@
 from minisgl.core import Req
 from minisgl.scheduler.cache import CacheManager
-from minisgl.kvcache import BaseCacheHandle
 
 class PSRTCacheManager(CacheManager):
-    def cache_req(self, req: Req, *, finished: bool) -> BaseCacheHandle: # return the new handle anyway
+    def cache_req(self, req: Req, *, finished: bool) -> None:
         # ==================================== valid cache region ====================================
         # [0, req.cached_len)                       This part is valid for attention kernel read/write.
         # [0, old_handle.cached_len)                This part is in the prefix cache before prefill.
@@ -23,10 +22,8 @@ class PSRTCacheManager(CacheManager):
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it
         self._free(page_indices[old_handle.cached_len : cached_len])
+        req.cache_handle = new_handle # modified: update handle anyways, children reqs need it
         if finished:  # this tail part should be freed
             self._free(page_indices[new_handle.cached_len :])
-        else:  # keep the tail part, update the handle
-            req.cache_handle = new_handle
+        else:  # keep the tail part
             self.lock(new_handle)
-        
-        return new_handle

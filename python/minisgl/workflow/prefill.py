@@ -1,12 +1,12 @@
 from dataclasses import dataclass, field
 from typing import List
-import bisect
 
 from minisgl.scheduler.prefill import ChunkedReq, PrefillAdder, PrefillManager
 from minisgl.scheduler.utils import PendingReq
 from minisgl.utils import init_logger
 from minisgl.core import Batch, Req
 from .psrt import PSRTNode
+from .policy import SCHEDULE_POLICY_MAP, EVICT_POLICY_MAP
 
 logger = init_logger(__name__)
 
@@ -55,36 +55,40 @@ class PSRTPrefillAdder(PrefillAdder):
 
 @dataclass
 class PSRTPrefillManager(PrefillManager):
-    priority_list: List[int] = field(default_factory=list)
+    schedule_policy: str = "LPM"
+    evict_policy: str = "LIFO"
 
     def evict_one(self) -> bool:
         # find child requests from the end of the pending_list
-        for i in range(len(self.pending_list) - 1, -1, -1):
-            req = self.pending_list[i]
-            if req.chunked_req is not None and type(req.chunked_req) is Req: # child req
-                self.cache_manager.unlock(req.chunked_req.cache_handle)
-                
-                req.chunked_req = None 
-                logger.info_rank0(f"Evicted pending child_req {req.uid} to free up space.")
-                return True
+        get_victim = EVICT_POLICY_MAP.get(self.evict_policy)
+        assert get_victim is not None, f"evict policy {self.evict_policy} not supported"
+        evict_req_idx = get_victim(self.pending_list)
+
+        if evict_req_idx is not None:
+            req = self.pending_list[evict_req_idx]
+            self.cache_manager.unlock(req.chunked_req.cache_handle)
+            req.chunked_req = None 
+            # logger.info_rank0(f"Evicted pending child_req {req.uid} to free up space.")
+            return True
+
         return False
 
-    def add_one_req(self, uid, input_ids, sampling_params, priority) -> None:
-        idx = bisect.bisect_right(self.priority_list, priority)
-        self.priority_list.insert(idx, priority)
-        self.pending_list.insert(idx, PendingReq(uid, input_ids, sampling_params))
+    def add_one_req(self, uid, input_ids, sampling_params) -> None:
+        self.pending_list.append(PendingReq(uid, input_ids, sampling_params))
 
-    def add_child_req(self, req: Req, priority) -> None:
+    def add_child_req(self, req: Req) -> None:
         pending = PendingReq(req.uid, req.input_ids, req.sampling_params)
         # disguise as chunked_req
         pending.chunked_req = req 
-        idx = bisect.bisect_right(self.priority_list, priority)
-        self.priority_list.insert(idx, priority)
-        self.pending_list.insert(idx, pending)
+        self.pending_list.append(pending)
 
     def schedule_next_batch(self, prefill_budget: int) -> Batch | None:
         if len(self.pending_list) == 0:
             return None
+
+        sort_func = SCHEDULE_POLICY_MAP.get(self.schedule_policy, None)
+        assert sort_func is not None, f"schedule policy {self.schedule_policy} not supported"
+        self.pending_list = sort_func(self.pending_list, cache_manager=self.cache_manager)
 
         # estimated offset due to in-flight decode
         adder = PSRTPrefillAdder(

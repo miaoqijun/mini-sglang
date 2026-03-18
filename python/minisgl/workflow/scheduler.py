@@ -52,7 +52,7 @@ class WorkflowScheduler(Scheduler):
         self.debug = debug
 
         self.status_map: Dict[int, NodeStatus] = {}
-        self.info_map: Dict[int, PSRTNode] = {}
+        self.uid2node: Dict[int, PSRTNode] = {}
         self.ready_nodes: List[PSRTNode] = []
         self.node_cnt = 0
         self.completed_node = set()
@@ -118,12 +118,12 @@ class WorkflowScheduler(Scheduler):
             if node.parent is None: # record psrt enter time
                 node.t = self.t
                 self.t += 1
-            self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params, self.info_map[node.get_root()].t)
+            self.prefill_manager.add_one_req(node.uid, input_ids, sampling_params)
         self.ready_nodes = []
     
-    def _spawn_children_reqs(self, parent_req: Req, node: PSRTNode, handle: BaseCacheHandle) -> None:
+    def _spawn_children_reqs(self, parent_req: Req, node: PSRTNode) -> None:
         for i, child in enumerate(node.children):
-            self.cache_manager.lock(handle)
+            self.cache_manager.lock(parent_req.cache_handle)
 
             # prepare a new req
             assert len(child.inputs) == 2 and child.inputs[1].node_ref is None, "We are assuming only root nodes have inter-psrt dependencies."
@@ -141,13 +141,9 @@ class WorkflowScheduler(Scheduler):
                 output_len=sampling_params.max_tokens,
                 uid=child.uid,
                 sampling_params=parent_req.sampling_params, 
-                cache_handle=handle,
+                cache_handle=parent_req.cache_handle,
             )
-            self.prefill_manager.add_child_req(child_req, self.info_map[child.get_root()].t)
-    
-    def _free_req_resources(self, req: Req) -> BaseCacheHandle:
-        self.table_manager.free(req.table_idx)
-        return self.cache_manager.cache_req(req, finished=True)
+            self.prefill_manager.add_child_req(child_req)
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
@@ -175,10 +171,10 @@ class WorkflowScheduler(Scheduler):
 
                     # expand psrt or free (leave node)
                     # TODO: we are assuming only root nodes have inter-psrt dependencies, so children are ready as soon as their parents are completed
-                    node = self.info_map[req.uid]
-                    new_handle = self._free_req_resources(req)
+                    node = self.uid2node[req.uid]
+                    self._free_req_resources(req)
                     if len(node.children) > 0:
-                        self._spawn_children_reqs(req, node, new_handle)
+                        self._spawn_children_reqs(req, node)
 
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
@@ -204,7 +200,7 @@ class WorkflowScheduler(Scheduler):
         total_cached = 0
         for uid, node_status in self.status_map.items():
             if node_status.inherited_len > 0:
-                assert node_status.cached_len >= 0, f"node {self.info_map[uid].name} not return a debug info message"
+                assert node_status.cached_len >= 0, f"node {self.uid2node[uid].name} not return a debug info message"
                 total_inherited += node_status.inherited_len
                 total_cached += min(node_status.cached_len, node_status.inherited_len) # only care tokens that should be cached
         debug_info['total_inherited'] = total_inherited
@@ -222,7 +218,7 @@ class WorkflowScheduler(Scheduler):
                 self.pbar.update(1)
                 self.completed_node.add(msg.uid)
 
-                for successor in self.info_map[msg.uid].successors:
+                for successor in self.uid2node[msg.uid].successors:
                     if successor.parent is not None: # only need to wake up other PSRT's root
                         continue
                     successor.ready_predecessor += 1
@@ -266,7 +262,7 @@ class WorkflowScheduler(Scheduler):
     ) -> Dict[int, Dict[str, str | List[int]]]:
         self.node_cnt = len(nodes)
         self.pbar = tqdm(total=self.node_cnt, desc=f"running inference for {self.node_cnt} nodes")
-        self.roots, self.info_map = get_PSRTs(nodes)
+        self.roots, self.uid2node = get_PSRTs(nodes)
         self.ready_nodes = [root for root in self.roots if root.in_degree == 0]
         self.prefill_manager.waiting_queue = [root for root in self.roots]
         try:
