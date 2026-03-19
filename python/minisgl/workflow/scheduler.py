@@ -86,18 +86,18 @@ class WorkflowScheduler(Scheduler):
                 text += self.tokenizer.decode(ref_ids)
         return text, len(inherited_ids)
 
-    def _check_sampling_params(self, sampling_params, input_len):
+    def _check_sampling_params(self, uid, sampling_params, input_len):
         max_seq_len = self.engine.max_seq_len
         max_output_len = max_seq_len - input_len
         if max_output_len <= 0:
             return logger.warning_rank0(
                 f"Input sequence length {input_len} exceeds {max_seq_len}, "
-                f"request {node.uid} is dropped."
+                f"request {uid} is dropped."
             )
         if sampling_params.max_tokens > max_output_len:
             sampling_params.max_tokens = max_output_len
             logger.warning_rank0(
-                f"Adjust max_tokens to {max_output_len} for request {node.uid}."
+                f"Adjust max_tokens to {max_output_len} for request {uid}."
             )
         return sampling_params
     
@@ -114,7 +114,7 @@ class WorkflowScheduler(Scheduler):
                 inherited_len=inherited_len,
             )     
 
-            sampling_params = self._check_sampling_params(node.sampling_params, len(input_ids))
+            sampling_params = self._check_sampling_params(node.uid, node.sampling_params, len(input_ids))
             if node.parent is None: # record psrt enter time
                 node.t = self.t
                 self.t += 1
@@ -128,16 +128,29 @@ class WorkflowScheduler(Scheduler):
             # prepare a new req
             assert len(child.inputs) == 2 and child.inputs[1].node_ref is None, "We are assuming only root nodes have inter-psrt dependencies."
             input_ids = torch.cat([parent_req.input_ids, self._tokenize_one(child.inputs[1].text)])
+
+            logical_inherited_len = len(parent_req.input_ids) #full parent context
+            physical_cached_len = parent_req.cache_handle.cached_len #only the page-aligned prefix
+            # Keep the logical inherited length for statistics/debug. The physical cached length used by the child req is tracked separately via `physical_cached_len`.
             self.status_map[child.uid] = NodeStatus(
                 input_ids=input_ids.tolist(),
                 output_ids=[],
-                inherited_len=len(parent_req.input_ids),
+                inherited_len=logical_inherited_len,
             )    
-            sampling_params = self._check_sampling_params(child.sampling_params, len(input_ids))
+            sampling_params = self._check_sampling_params(child.uid, child.sampling_params, len(input_ids))
+            if self.debug:
+                logger.warning_rank0(
+                    "spawn child: parent_uid=%s child_uid=%s parent_input_len=%s handle_cached_len=%s page_size=%s",
+                    parent_req.uid,
+                    child.uid,
+                    len(parent_req.input_ids),
+                    parent_req.cache_handle.cached_len,
+                    self.cache_manager.page_size,
+                )
             child_req = Req(
                 input_ids=input_ids,
                 table_idx=None,# need to allocate in PrefillAdder
-                cached_len=len(parent_req.input_ids),
+                cached_len=physical_cached_len,
                 output_len=sampling_params.max_tokens,
                 uid=child.uid,
                 sampling_params=parent_req.sampling_params, 

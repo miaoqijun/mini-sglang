@@ -23,11 +23,13 @@ class PSRTPrefillAdder(PrefillAdder):
 
                 chunked_req.table_idx = self.table_manager.allocate()
                 # set the inherited part
-                indices = chunked_req.cache_handle.get_matched_indices()
-                self.table_manager.page_table[chunked_req.table_idx][:len(indices)].copy_(indices)
-                self.table_manager.token_pool[chunked_req.table_idx][:len(indices)].copy_(
-                    chunked_req.input_ids[:len(indices)].pin_memory(), non_blocking=True
-                )
+                # Only copy inherited mapping when the handle actually contains a page-aligned cached prefix.
+                if chunked_req.cached_len > 0:
+                    indices = chunked_req.cache_handle.get_matched_indices()
+                    self.table_manager.page_table[chunked_req.table_idx][:len(indices)].copy_(indices)
+                    self.table_manager.token_pool[chunked_req.table_idx][:len(indices)].copy_(
+                        chunked_req.input_ids[:len(indices)].pin_memory(), non_blocking=True
+                    )
 
             # access control for chunked_req (possibly a child)
             extend_len = pending_req.input_len - chunked_req.cached_len
