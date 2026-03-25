@@ -59,12 +59,19 @@ class PSRTPrefillAdder(PrefillAdder):
 class PSRTPrefillManager(PrefillManager):
     schedule_policy: str = "LPM"
     evict_policy: str = "LIFO"
+    uid2node: dict | None = None
+    status_map: dict | None = None
 
     def evict_one(self) -> bool:
         # find child requests from the end of the pending_list
         get_victim = EVICT_POLICY_MAP.get(self.evict_policy)
         assert get_victim is not None, f"evict policy {self.evict_policy} not supported"
-        evict_req_idx = get_victim(self.pending_list)
+        evict_req_idx = get_victim(
+            self.pending_list,
+            cache_manager=self.cache_manager,
+            uid2node=self.uid2node,
+            status_map=self.status_map,
+        )
 
         if evict_req_idx is not None:
             req = self.pending_list[evict_req_idx]
@@ -90,7 +97,12 @@ class PSRTPrefillManager(PrefillManager):
 
         sort_func = SCHEDULE_POLICY_MAP.get(self.schedule_policy, None)
         assert sort_func is not None, f"schedule policy {self.schedule_policy} not supported"
-        self.pending_list = sort_func(self.pending_list, cache_manager=self.cache_manager)
+        self.pending_list = sort_func(
+            self.pending_list,
+            cache_manager=self.cache_manager,
+            uid2node=self.uid2node,
+            status_map=self.status_map,
+        )
 
         # estimated offset due to in-flight decode
         adder = PSRTPrefillAdder(

@@ -138,15 +138,6 @@ class WorkflowScheduler(Scheduler):
                 inherited_len=logical_inherited_len,
             )    
             sampling_params = self._check_sampling_params(child.uid, child.sampling_params, len(input_ids))
-            if self.debug:
-                logger.warning_rank0(
-                    "spawn child: parent_uid=%s child_uid=%s parent_input_len=%s handle_cached_len=%s page_size=%s",
-                    parent_req.uid,
-                    child.uid,
-                    len(parent_req.input_ids),
-                    parent_req.cache_handle.cached_len,
-                    self.cache_manager.page_size,
-                )
             child_req = Req(
                 input_ids=input_ids,
                 table_idx=None,# need to allocate in PrefillAdder
@@ -277,6 +268,8 @@ class WorkflowScheduler(Scheduler):
         self.pbar = tqdm(total=self.node_cnt, desc=f"running inference for {self.node_cnt} nodes")
         self.roots, self.uid2node = get_PSRTs(nodes)
         self.ready_nodes = [root for root in self.roots if root.in_degree == 0]
+        self.prefill_manager.uid2node = self.uid2node
+        self.prefill_manager.status_map = self.status_map
         self.prefill_manager.waiting_queue = [root for root in self.roots]
         try:
             self.run_forever()
